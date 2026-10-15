@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Рисовалка</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="icon-192.png">
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: "Segoe UI Light", "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-weight: 300; color: #fff; }
+  #app { display: -webkit-flex; display: flex; -webkit-flex-direction: column; flex-direction: column; height: 100%; }
+  #wrap { -webkit-flex: 1; flex: 1; position: relative; min-height: 0; overflow: hidden; }
+  #c { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #000; touch-action: none; }
+
+  #panel { background: #000; padding: 1px; }
+  #tools { display: -webkit-flex; display: flex; }
+  .t { -webkit-flex: 1; flex: 1; min-width: 0; height: 50px; border: 0; margin: 1px; padding: 0 2px;
+    color: #fff; background: #333; font: inherit; font-size: 12px; letter-spacing: 0; text-align: center;
+    white-space: nowrap; border-radius: 0; outline: none; }
+  .t:active { opacity: 0.6; }
+  .t.on { background: #1ba1e2; }
+  .t[disabled] { opacity: 0.35; }
+
+  /* выезжающие панели */
+  .pop { position: absolute; left: 0; right: 0; bottom: 0; background: #222;
+    -webkit-transform: translateY(100%); transform: translateY(100%);
+    -webkit-transition: -webkit-transform .25s ease; transition: transform .25s ease; }
+  .pop.show { -webkit-transform: translateY(0); transform: translateY(0); }
+  #spec { display: block; width: 100%; height: 150px; touch-action: none; }
+  #pSize { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; height: 56px; padding: 0 8px 0 14px; }
+  #rng { -webkit-appearance: none; appearance: none; -webkit-flex: 1; flex: 1; width: 100%; height: 44px;
+    margin: 0; padding: 0; background: transparent; outline: none; }
+  #rng::-webkit-slider-runnable-track { height: 44px; background: transparent; }
+  #rng::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 30px; margin-top: 7px;
+    background: #fff; border: 0; border-radius: 0; }
+  #rng::-moz-range-track { background: transparent; }
+  #rng::-moz-range-thumb { width: 14px; height: 30px; background: #fff; border: 0; border-radius: 0; }
+  #szv { width: 64px; text-align: center; font-size: 22px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="wrap">
+    <canvas id="c"></canvas>
+    <div class="pop" id="pColor"><canvas id="spec"></canvas></div>
+    <div class="pop" id="pSize">
+      <input type="range" id="rng" min="1" max="100" step="1">
+      <div id="szv"></div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <div id="tools">
+      <button class="t" id="bCol">цвет</button>
+      <button class="t" id="bSize">толщина</button>
+      <button class="t" id="bEr">ластик</button>
+      <button class="t" id="bClr">очистить</button>
+      <button class="t" id="bUndo">отмена</button>
+      <button class="t" id="bRedo">вернуть</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var c = document.getElementById('c'), x = c.getContext('2d');
+  var strokes = [], redoSt = [], cur = null, snap = null;
+  var color = '#1ba1e2', size = 4, erase = false, dpr = window.devicePixelRatio || 1;
+  var popOpen = false, sizeOpen = false;
+
+  function $(id) { return document.getElementById(id); }
+
+  /* ---------- цвет ---------- */
+  function hex2(v) { var t = v.toString(16); return t.length < 2 ? '0' + t : t; }
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    var a = s * Math.min(l, 1 - l);
+    function f(n) {
+      var k = (n + h / 30) % 12;
+      return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)))));
+    }
+    return '#' + hex2(f(0)) + hex2(f(8)) + hex2(f(4));
+  }
+  function contrast(hex) {
+    var r = parseInt(hex.substr(1, 2), 16), g = parseInt(hex.substr(3, 2), 16), b = parseInt(hex.substr(5, 2), 16);
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6 ? '#000' : '#fff';
+  }
+
+  /* ---------- панели ---------- */
+  function setPops() {
+    $('pColor').className = 'pop' + (popOpen ? ' show' : '');
+    $('pSize').className = 'pop' + (sizeOpen ? ' show' : '');
+    ui();
+  }
+  function closeAll() { popOpen = false; sizeOpen = false; setPops(); }
+
+  $('bCol').onclick = function () {
+    popOpen = !popOpen; sizeOpen = false;
+    if (popOpen) drawSpec();
+    setPops();
+  };
+  $('bSize').onclick = function () {
+    sizeOpen = !sizeOpen; popOpen = false;
+    if (sizeOpen) { rng.value = size; paintRng(); }
+    setPops();
+  };
+
+  /* ---------- спектр ---------- */
+  var spec = $('spec'), sx = spec.getContext('2d'), picking = false;
+  function drawSpec() {
+    var w = spec.clientWidth, h = spec.clientHeight;
+    if (!w || !h) return;
+    spec.width = w; spec.height = h;
+    var g = sx.createLinearGradient(0, 0, w, 0);
+    for (var i = 0; i <= 12; i++) g.addColorStop(i / 12, 'hsl(' + (i * 30) + ',100%,50%)');
+    sx.fillStyle = g; sx.fillRect(0, 0, w, h);
+    var v = sx.createLinearGradient(0, 0, 0, h);
+    v.addColorStop(0, 'rgba(255,255,255,1)');
+    v.addColorStop(0.5, 'rgba(255,255,255,0)');
+    v.addColorStop(0.5, 'rgba(0,0,0,0)');
+    v.addColorStop(1, 'rgba(0,0,0,1)');
+    sx.fillStyle = v; sx.fillRect(0, 0, w, h);
+  }
+  function pickAt(e) {
+    var r = spec.getBoundingClientRect();
+    var t = e.touches && e.touches.length ? e.touches[0] : e;
+    var px = Math.max(0, Math.min(1, (t.clientX - r.left) / r.width));
+    var py = Math.max(0, Math.min(1, (t.clientY - r.top) / r.height));
+    color = hslToHex(Math.round(px * 360) % 360, 100, Math.round((1 - py) * 100));
+    erase = false;
+    ui();
+  }
+  function sStart(e) { e.preventDefault(); picking = true; pickAt(e); }
+  function sMove(e) { if (picking) { e.preventDefault(); pickAt(e); } }
+  function sEnd() { picking = false; }
+  spec.addEventListener('touchstart', sStart, { passive: false });
+  spec.addEventListener('touchmove', sMove, { passive: false });
+  spec.addEventListener('touchend', sEnd);
+  spec.addEventListener('mousedown', sStart);
+  window.addEventListener('mousemove', sMove);
+  window.addEventListener('mouseup', sEnd);
+
+  /* ---------- толщина ---------- */
+  var rng = $('rng');
+  function paintRng() {
+    var edge = 'calc(7px + (100% - 14px) * ' + ((size - 1) / 99) + ')';
+    rng.style.background = 'linear-gradient(to right, #1ba1e2 ' + edge + ', #666 ' + edge + ') center / 100% 4px no-repeat';
+    $('szv').textContent = size;
+  }
+  rng.oninput = function () { size = parseInt(this.value, 10) || 1; paintRng(); };
+
+  /* ---------- кнопки ---------- */
+  $('bEr').onclick = function () { erase = !erase; closeAll(); };
+  $('bClr').onclick = function () { strokes = []; redoSt = []; redraw(); closeAll(); };
+  $('bUndo').onclick = function () { if (strokes.length) { redoSt.push(strokes.pop()); redraw(); ui(); } };
+  $('bRedo').onclick = function () { if (redoSt.length) { strokes.push(redoSt.pop()); redraw(); ui(); } };
+
+  function ui() {
+    var tc = contrast(color);
+    var bc = $('bCol');
+    bc.style.background = color;
+    bc.style.color = tc;
+    $('bSize').className = 't' + (sizeOpen ? ' on' : '');
+    $('bEr').className = 't' + (erase ? ' on' : '');
+    $('bUndo').disabled = !strokes.length;
+    $('bRedo').disabled = !redoSt.length;
+  }
+
+  /* ---------- подгонка под экран ---------- */
+  function layout() {
+    var W = window.innerWidth, H = window.innerHeight;
+    $('app').style.height = H + 'px';
+    var fs = Math.max(11, Math.min(34, (W / 6 - 6) / 4.6));
+    var bh = Math.max(48, Math.min(96, Math.round(fs * 2.8)));
+    var bs = document.querySelectorAll('#tools .t');
+    for (var i = 0; i < bs.length; i++) { bs[i].style.fontSize = fs + 'px'; bs[i].style.height = bh + 'px'; }
+    $('szv').style.fontSize = Math.round(fs * 1.3) + 'px';
+    $('pSize').style.height = Math.max(56, bh) + 'px';
+    spec.style.height = Math.max(120, Math.min(260, Math.round(H * 0.28))) + 'px';
+  }
+
+  /* ---------- рисование ---------- */
+  function resize() {
+    layout();
+    c.width = Math.round(c.clientWidth * dpr);
+    c.height = Math.round(c.clientHeight * dpr);
+    redraw();
+    drawSpec();
+  }
+  function setup(s) {
+    x.strokeStyle = s.c; x.fillStyle = s.c; x.lineWidth = s.w;
+    x.lineCap = 'round'; x.lineJoin = 'round';
+  }
+  function drawStroke(s) {
+    setup(s);
+    var p = s.p;
+    if (p.length === 1) {
+      x.beginPath(); x.arc(p[0][0], p[0][1], s.w / 2, 0, Math.PI * 2); x.fill();
+    } else {
+      x.beginPath(); x.moveTo(p[0][0], p[0][1]);
+      for (var i = 1; i < p.length; i++) x.lineTo(p[i][0], p[i][1]);
+      x.stroke();
+    }
+  }
+  function redraw() {
+    x.setTransform(dpr, 0, 0, dpr, 0, 0);
+    x.fillStyle = '#000';
+    x.fillRect(0, 0, c.width, c.height);
+    for (var i = 0; i < strokes.length; i++) drawStroke(strokes[i]);
+  }
+  function pos(e) {
+    var r = c.getBoundingClientRect();
+    var t = e.touches && e.touches.length ? e.touches[0] : e;
+    return [t.clientX - r.left, t.clientY - r.top];
+  }
+  function hasInk() {
+    for (var i = 0; i < strokes.length; i++) if (!strokes[i].er) return true;
+    return false;
+  }
+  function start(e) {
+    e.preventDefault();
+    if (popOpen || sizeOpen) { closeAll(); return; }
+    var p = pos(e);
+    cur = { c: erase ? '#000000' : color, w: erase ? size * 2 : size, p: [p], er: erase };
+    if (erase) {
+      snap = hasInk() ? x.getImageData(0, 0, c.width, c.height) : null;
+    } else {
+      redoSt = [];
+    }
+    strokes.push(cur);
+    drawStroke(cur);
+    ui();
+  }
+  function move(e) {
+    if (!cur) return;
+    e.preventDefault();
+    var p = pos(e), last = cur.p[cur.p.length - 1];
+    cur.p.push(p);
+    setup(cur);
+    x.beginPath(); x.moveTo(last[0], last[1]); x.lineTo(p[0], p[1]); x.stroke();
+  }
+  function end(e) {
+    if (!cur) return;
+    e.preventDefault();
+    var s = cur; cur = null;
+    if (s.er) {
+      var changed = false;
+      if (snap) {
+        var a = new Uint32Array(snap.data.buffer);
+        var b = new Uint32Array(x.getImageData(0, 0, c.width, c.height).data.buffer);
+        for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) { changed = true; break; } }
+      }
+      snap = null;
+      if (changed) { redoSt = []; } else { strokes.pop(); }
+    }
+    ui();
+  }
+
+  c.addEventListener('touchstart', start, { passive: false });
+  c.addEventListener('touchmove', move, { passive: false });
+  c.addEventListener('touchend', end, { passive: false });
+  c.addEventListener('touchcancel', end, { passive: false });
+  c.addEventListener('mousedown', start);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', function () { setTimeout(resize, 200); });
+
+  paintRng(); ui(); resize();
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js'); });
+  }
+})();
+</script>
+</body>
+</html>
